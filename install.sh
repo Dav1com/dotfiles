@@ -22,23 +22,27 @@ else
 fi
 
 # --- System packages ----------------------------------------------------------
-# fish, plus what Helix needs to fetch (git) and build (C/C++ compiler) grammars.
+# fish, plus what Helix needs to fetch (git) and build (C/C++ compiler) grammars,
+# and gdbus + jq for the Claude notification hook.
 install_packages() {
 	if command -v apt-get >/dev/null 2>&1; then
 		export DEBIAN_FRONTEND=noninteractive
 		$SUDO apt-get update
 		$SUDO apt-get install -y --no-install-recommends \
-			fish git curl ca-certificates xz-utils tar build-essential
+			fish git curl ca-certificates xz-utils tar build-essential \
+			libglib2.0-bin jq
 	elif command -v dnf >/dev/null 2>&1; then
-		$SUDO dnf install -y fish git curl ca-certificates xz tar gcc gcc-c++
+		$SUDO dnf install -y fish git curl ca-certificates xz tar gcc gcc-c++ \
+			glib2 jq
 	elif command -v apk >/dev/null 2>&1; then
 		# musl: the upstream Helix tarball is glibc-only, so use Alpine's package.
 		# helix-tree-sitter-vendor provides the runtime queries Alpine splits out.
 		# libgcc/libstdc++/ripgrep are required by Claude Code's native build.
 		$SUDO apk add --no-cache fish git curl ca-certificates bash build-base \
-			libgcc libstdc++ ripgrep helix helix-tree-sitter-vendor
+			libgcc libstdc++ ripgrep helix helix-tree-sitter-vendor glib jq
 	elif command -v pacman >/dev/null 2>&1; then
-		$SUDO pacman -Sy --noconfirm --needed fish git curl ca-certificates xz tar base-devel
+		$SUDO pacman -Sy --noconfirm --needed fish git curl ca-certificates xz tar base-devel \
+			glib2 jq
 	else
 		echo "Unsupported package manager" >&2
 		exit 1
@@ -112,6 +116,45 @@ link_configs() {
 	# in place before build_helix_grammars runs.
 	link_file helix/languages.toml "$HOME/.config/helix/languages.toml"
 	link_file fish/conf.d/local-bin.fish "$HOME/.config/fish/conf.d/local-bin.fish"
+	link_file fish/conf.d/dbus-notifications.fish "$HOME/.config/fish/conf.d/dbus-notifications.fish"
+}
+
+# Set just the identity keys so the rest of any copied-in ~/.gitconfig is kept.
+configure_git() {
+	log "Configuring git user"
+	git config --global user.name "Dav1com"
+	git config --global user.email "42521812+Dav1com@users.noreply.github.com"
+}
+
+# Merge into settings.json rather than linking a repo copy, since Claude writes
+# to it (e.g. /config, permission approvals) and that shouldn't dirty the repo.
+configure_claude() {
+	local dir="$HOME/.claude"
+	local settings="$dir/settings.json"
+	local hook_cmd='sh "$HOME/.claude/hooks/notify.sh"'
+	mkdir -p "$dir/hooks"
+
+	if [ ! -e "$dir/hooks/notify.sh" ]; then
+		cp "$DOTFILES_DIR/claude/hooks/notify.sh" "$dir/hooks/notify.sh"
+	fi
+
+	[ -s "$settings" ] || echo '{}' >"$settings"
+	local merged
+	# Desktop notifications go through the host's filtered D-Bus proxy; empty
+	# attribution strings stop Claude adding co-author trailers to commits/PRs;
+	# remoteControlAtStartup makes every session remote controllable (it's only
+	# honored in user settings, not project/local ones).
+	if ! merged="$(jq --arg cmd "$hook_cmd" '
+		.attribution = ((.attribution // {}) + {commit: "", pr: ""})
+		| .remoteControlAtStartup = true
+		| if any(.hooks.Notification[]?.hooks[]?; .command == $cmd) then .
+		  else .hooks.Notification += [{hooks: [{type: "command", command: $cmd}]}]
+		  end' "$settings")"; then
+		log "Warning: $settings isn't valid JSON, leaving it alone"
+		return
+	fi
+	log "Configuring Claude Code settings"
+	printf '%s\n' "$merged" >"$settings"
 }
 
 # Append to the image's existing rc files rather than replacing them, so any
@@ -147,6 +190,8 @@ main() {
 	install_claude
 	install_helix
 	link_configs
+	configure_git
+	configure_claude
 	hook_fish_into_rc_files
 	build_helix_grammars
 	log "Done. Open a new terminal to start fish."

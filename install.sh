@@ -117,6 +117,7 @@ link_configs() {
 	link_file helix/languages.toml "$HOME/.config/helix/languages.toml"
 	link_file fish/conf.d/local-bin.fish "$HOME/.config/fish/conf.d/local-bin.fish"
 	link_file fish/conf.d/dbus-notifications.fish "$HOME/.config/fish/conf.d/dbus-notifications.fish"
+	link_file fish/conf.d/env.fish "$HOME/.config/fish/conf.d/env.fish"
 }
 
 # Set just the identity keys so the rest of any copied-in ~/.gitconfig is kept.
@@ -159,18 +160,22 @@ configure_claude() {
 
 # Append to the image's existing rc files rather than replacing them, so any
 # setup the devcontainer image ships with is kept.
-hook_fish_into_rc_files() {
-	local line=". \"$DOTFILES_DIR/shell/start-fish.sh\""
-	local rc
+# env.sh must come before start-fish.sh, which execs fish. Any earlier hook is
+# removed first, so reruns keep that order and don't duplicate lines.
+hook_into_rc_files() {
+	local marker="# dotfiles: terminal env, then switch to fish"
+	local rc rest
 	for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
 		if [ "$rc" = "$HOME/.zshrc" ] && ! command -v zsh >/dev/null 2>&1; then
 			continue
 		fi
-		if ! grep -qsF "$line" "$rc"; then
-			log "Starting fish from $rc"
-			printf '\n# Switch to fish (see %s/shell/start-fish.sh)\n%s\n' \
-				"$DOTFILES_DIR" "$line" >>"$rc"
+		if [ -f "$rc" ]; then
+			rest="$(grep -vF -e "$marker" -e "$DOTFILES_DIR/shell/" "$rc" || true)"
+			printf '%s\n' "$rest" >"$rc"
 		fi
+		log "Hooking env and fish into $rc"
+		printf '\n%s\n. "%s/shell/env.sh"\n. "%s/shell/start-fish.sh"\n' \
+			"$marker" "$DOTFILES_DIR" "$DOTFILES_DIR" >>"$rc"
 	done
 }
 
@@ -192,7 +197,7 @@ main() {
 	link_configs
 	configure_git
 	configure_claude
-	hook_fish_into_rc_files
+	hook_into_rc_files
 	build_helix_grammars
 	log "Done. Open a new terminal to start fish."
 }
